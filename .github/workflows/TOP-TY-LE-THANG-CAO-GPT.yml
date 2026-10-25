@@ -34,5 +34,5 @@ jobs:
         if: always()
         with:
           name: TOP-TY-LE-THANG-CAO-GPT-result
-          path: result.json
+          path: |\n            result.json\n            development_diagnostics.json
           if-no-files-found: ignore
