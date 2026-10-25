@@ -82,7 +82,7 @@ def ev(d,p):
     if q.empty:return None
     a=[one(r,p) for r in q.itertuples(index=False)]; ret=np.array([x[0] for x in a]); rs=np.array([x[1] for x in a])
     pos=ret[ret>0]; neg=ret[ret<0]; pf=pos.sum()/abs(neg.sum()) if len(neg) and neg.sum()!=0 else 99.
-    return {"n":len(ret),"win2":float(np.mean(ret>=2)*100),"positive":float(np.mean(ret>0)*100),"avg":float(ret.mean()),"median":float(np.median(ret)),
+    return {"n":len(ret),"win2":float(np.mean(ret>=2-1e-8)*100),"positive":float(np.mean(ret>0)*100),"avg":float(ret.mean()),"median":float(np.median(ret)),
             "stop":float(np.mean(rs=="STOP")*100),"target":float(np.mean(rs=="TARGET")*100),"pf":float(pf),
             "avgwin":float(pos.mean()) if len(pos) else 0,"avgloss":float(neg.mean()) if len(neg) else 0,
             "mae":float(np.mean([x[2] for x in a])),"mfe":float(np.mean([x[3] for x in a]))}
@@ -104,9 +104,12 @@ def grid():
 
 def telegram(msg):
     tok=os.getenv("BOT_TOKEN"); chat=os.getenv("CHAT_ID")
-    if not tok or not chat:return
+    if not tok or not chat: raise RuntimeError("BOT_TOKEN or CHAT_ID GitHub Secret is missing")
     data=urllib.parse.urlencode({"chat_id":chat,"text":msg}).encode()
-    urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage",data=data),timeout=20).read()
+    raw=urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage",data=data),timeout=20).read()
+    response=json.loads(raw)
+    if not response.get("ok"): raise RuntimeError("Telegram API rejected the message")
+    return response.get("result",{}).get("message_id")
 
 def fast_metrics(q, p):
     """Evaluate precomputed exits; all results are net of round-trip fees."""
@@ -196,8 +199,12 @@ def main():
     Path("result.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
     print("LOCKED_RESULT",json.dumps(result,ensure_ascii=False),flush=True)
     h=ho or {}
-    telegram("🏆 TOP-TY-LE-THANG-CAO-GPT — KẾT QUẢ KHÓA\\n"
-      f"DEV: {de['n']} lệnh | ≥2%: {de['win2']:.1f}% | Có lãi: {de['positive']:.1f}% | TB: {de['avg']:+.2f}% | Stop: {de['stop']:.1f}% | PF: {de['pf']:.2f}\\n"
-      f"HOLDOUT: {h.get('n',0)} lệnh | ≥2%: {h.get('win2',float('nan')):.1f}% | Có lãi: {h.get('positive',float('nan')):.1f}% | TB: {h.get('avg',float('nan')):+.2f}% | Stop: {h.get('stop',float('nan')):.1f}% | PF: {h.get('pf',float('nan')):.2f}\\n"
-      f"Grid {tested:,} | Robust {len(candidates)} | phí 0.4%")
+    message=("🏆 TOP-TY-LE-THANG-CAO-GPT — KẾT QUẢ KHÓA" + chr(10)
+      + f"DEV: {de['n']} lệnh | ≥2%: {de['win2']:.1f}% | Có lãi: {de['positive']:.1f}% | TB: {de['avg']:+.2f}% | Stop: {de['stop']:.1f}% | PF: {de['pf']:.2f}" + chr(10)
+      + f"HOLDOUT: {h.get('n',0)} lệnh | ≥2%: {h.get('win2',float('nan')):.1f}% | Có lãi: {h.get('positive',float('nan')):.1f}% | TB: {h.get('avg',float('nan')):+.2f}% | Stop: {h.get('stop',float('nan')):.1f}% | PF: {h.get('pf',float('nan')):.2f}" + chr(10)
+      + f"Grid {tested:,} | Robust {len(candidates)} | phí 0.4%")
+    msg_id=telegram(message)
+    result["telegram_message_id"]=msg_id
+    result["telegram_delivered"]=bool(msg_id)
+    Path("result.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
 if __name__=="__main__":main()
