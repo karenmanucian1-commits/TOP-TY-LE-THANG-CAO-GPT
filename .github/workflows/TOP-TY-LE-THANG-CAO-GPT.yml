@@ -1,31 +1,28 @@
 name: TOP-TY-LE-THANG-CAO-GPT
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "bot_research.py"
-      - ".github/workflows/TOP-TY-LE-THANG-CAO-GPT.yml"
 permissions:
   contents: read
 jobs:
   research:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      - name: Runner OK
+        run: echo "GitHub runner started"
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - name: Restore independent historical data
+      - name: Restore historical data
         run: |
-          test -f stock_cache_seed.zip || { echo "ERROR: stock_cache_seed.zip missing"; exit 1; }
           rm -rf data && mkdir data
           unzip -q stock_cache_seed.zip -d data
           COUNT=$(find data -type f -name '*.csv' | wc -l)
           echo "Historical CSV files: $COUNT"
-          test "$COUNT" -ge 400 || { echo "ERROR: historical dataset incomplete"; exit 1; }
-      - name: Optimize Development then lock and evaluate Holdout
+          test "$COUNT" -ge 400
+      - name: Research
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
