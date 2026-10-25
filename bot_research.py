@@ -109,31 +109,50 @@ def telegram(msg):
     urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage",data=data),timeout=20).read()
 
 def main():
-    x=load_market(); c=attach_future(x); dev=c[c.date<=DEV_END]; hold=c[c.date>=HOLD_START]
+    x=load_market(); c=attach_future(x)
+    dev=c[c.date<=DEV_END].copy(); hold=c[c.date>=HOLD_START].copy()
     folds=[dev[(dev.date>=a)&(dev.date<=b)] for a,b in [
       (pd.Timestamp("2023-01-01"),pd.Timestamp("2024-01-31")),
       (pd.Timestamp("2024-02-01"),pd.Timestamp("2025-03-31")),
       (pd.Timestamp("2025-04-01"),DEV_END)]]
-    best=None; tested=passed=0
+    # Stage 1: screen all configurations on Development. Keep broad top candidates,
+    # then demand positive expectancy in every Development fold.
+    shortlist=[]; tested=0
     for p in grid():
         tested+=1; e=ev(dev,p)
-        if not e or e["n"]<120 or e["avg"]<=0 or e["pf"]<=1:continue
+        if not e or e["n"]<80 or e["avg"]<=0 or e["pf"]<=1: continue
+        # Risk-adjusted objective: >=2% wins matter most, but stop rate/loss severity are penalized.
+        score=e["win2"]*1.35+e["positive"]*.25+e["avg"]*12+min(e["pf"],3)*5-e["stop"]*.55+e["avgloss"]*2
+        shortlist.append((score,p,e))
+    shortlist=sorted(shortlist,key=lambda z:z[0],reverse=True)[:300]
+    robust=[]
+    diagnostics=[]
+    for score,p,e in shortlist:
         fs=[ev(f,p) for f in folds]
-        if any(not q or q["n"]<25 or q["avg"]<=0 for q in fs):continue
-        passed+=1; floor=min(q["avg"] for q in fs)
-        score=e["win2"]*1.2+e["positive"]*.35+e["avg"]*10+min(e["pf"],3)*5-e["stop"]*.45+floor*8
-        if best is None or score>best[0]:best=(score,p,e,fs)
-    if best is None:raise RuntimeError("No robust configuration passed Development constraints")
-    _,p,de,fs=best
-    # Parameters are locked before Holdout is evaluated.
+        ok=all(q and q["n"]>=15 and q["avg"]>0 and q["pf"]>1 for q in fs)
+        floor=min((q["avg"] for q in fs if q),default=-999)
+        diagnostics.append({"score":score,"params":p,"development":e,"folds":fs,"robust":ok})
+        if ok:
+            robust_score=score+floor*10-min(np.std([q["avg"] for q in fs]),5)*2
+            robust.append((robust_score,p,e,fs))
+    diag={"tested":tested,"screened":len(shortlist),"robust_count":len(robust),
+          "top_candidates":diagnostics[:20]}
+    Path("development_diagnostics.json").write_text(json.dumps(diag,ensure_ascii=False,indent=2),encoding="utf-8")
+    if not robust:
+        telegram(f"⚠️ TOP-TY-LE-THANG-CAO-GPT vòng 2: chưa có cấu hình robust. Đã test {tested:,}; {len(shortlist)} cấu hình Development có P/L dương. Holdout CHƯA mở.")
+        raise RuntimeError("No configuration remained profitable across all Development folds")
+    robust.sort(key=lambda z:z[0],reverse=True)
+    _,p,de,fs=robust[0]
+    # LOCK: Holdout is touched only after the Development winner is fixed.
     ho=ev(hold,p)
-    result={"tested":tested,"robust_passed":passed,"locked_params":p,"development":de,"development_folds":fs,"holdout":ho,
+    result={"tested":tested,"screened":len(shortlist),"robust_passed":len(robust),
+            "locked_params":p,"development":de,"development_folds":fs,"holdout":ho,
             "fee_pct":FEE*100,"target_net_pct":NET_TARGET*100,"data_max":str(x.date.max().date())}
     Path("result.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
-    print(json.dumps(result,ensure_ascii=False))
+    print("LOCKED_RESULT",json.dumps(result,ensure_ascii=False))
     h=ho or {}
-    telegram("🏆 TOP-TY-LE-THANG-CAO-GPT\n"
+    telegram("🏆 TOP-TY-LE-THANG-CAO-GPT — KẾT QUẢ KHÓA\n"
       f"DEV: {de['n']} lệnh | ≥2%: {de['win2']:.1f}% | Có lãi: {de['positive']:.1f}% | TB: {de['avg']:+.2f}% | Stop: {de['stop']:.1f}% | PF: {de['pf']:.2f}\n"
       f"HOLDOUT: {h.get('n',0)} lệnh | ≥2%: {h.get('win2',float('nan')):.1f}% | Có lãi: {h.get('positive',float('nan')):.1f}% | TB: {h.get('avg',float('nan')):+.2f}% | Stop: {h.get('stop',float('nan')):.1f}% | PF: {h.get('pf',float('nan')):.2f}\n"
-      f"Grid {tested:,} | Robust pass {passed:,} | phí 0.4%")
+      f"Grid {tested:,} | Robust {len(robust)} | phí 0.4%")
 if __name__=="__main__":main()
