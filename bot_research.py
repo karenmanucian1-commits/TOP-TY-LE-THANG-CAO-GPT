@@ -7,6 +7,7 @@ from pathlib import Path
 import json, os, urllib.parse, urllib.request
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import HistGradientBoostingClassifier
 
 ROOT=Path(__file__).resolve().parent
 DATA=ROOT/"data"
@@ -129,6 +130,30 @@ def fast_metrics(q, p):
             "avgwin":float(pos.mean()) if len(pos) else 0.,
             "avgloss":float(neg.mean()) if len(neg) else 0.}
 
+def ml_probability_research(dev):
+    """Walk-forward probability model. Labels/outcomes use Development only."""
+    feats=["rsi","volr","atrp","ma20d","ret5","ret20","break20","avgval20bn"]
+    d=dev.dropna(subset=feats).copy()
+    p={"target":.025,"stop":.02,"hz":7}
+    y=[]
+    for r in d.itertuples(index=False):
+        ret,_,_,_=one(r,p); y.append(int(ret>=2.0))
+    d["y"]=y
+    probs=pd.Series(np.nan,index=d.index,dtype=float)
+    for test_fold in [1,2]:
+        tr=d[d.fold<test_fold]; te=d[d.fold==test_fold]
+        if len(tr)<200 or te.empty: continue
+        model=HistGradientBoostingClassifier(max_iter=180,max_leaf_nodes=15,learning_rate=.05,l2_regularization=1.0,random_state=42)
+        model.fit(tr[feats],tr.y)
+        probs.loc[te.index]=model.predict_proba(te[feats])[:,1]
+    d["prob"]=probs
+    reports=[]
+    for th in [.55,.60,.65,.70,.75]:
+        q=dedup(d[(d.prob>=th)&d.prob.notna()])
+        e=ev(q,p) if len(q) else None
+        if e: reports.append({"threshold":th,"metrics":e,"n":len(q)})
+    return {"features":feats,"exit":p,"walk_forward":reports}
+
 def main():
     x=load_market()
     c=attach_future(x)
@@ -179,7 +204,8 @@ def main():
             candidates.append((float(score+floor*10-min(dispersion,5)*2),diag))
     near.sort(key=lambda z:z["score"],reverse=True)
     candidates.sort(key=lambda z:z[0],reverse=True)
-    diagnostics={"tested":tested,"screened":screened,"robust_count":len(candidates),
+    ml_diag=ml_probability_research(dev)
+    diagnostics={"ml_probability_research":ml_diag,"tested":tested,"screened":screened,"robust_count":len(candidates),
                  "development_rows":len(dev),"holdout_rows_not_used_for_tuning":len(hold),
                  "fold_boundaries":folds,"top_development_candidates":near[:30],
                  "top_robust_candidates":[z for _,z in candidates[:15]],
