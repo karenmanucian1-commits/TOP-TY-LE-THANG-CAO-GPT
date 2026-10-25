@@ -60,12 +60,14 @@ def pmask(d,p):
     return d.rsi.between(p["rlo"],p["rhi"])&(d.volr>=p["vr"])&d.atrp.between(.8,p["ahi"])&(d.ma20d<=p["m20"])&(d.ret5>=p["r5"])&(d.ret20>=p["r20"])&(d.avgval20bn>=p["val"])&(d.break20>=p["br"])
 
 def dedup(d):
+    # Keep original DataFrame column names intact. Using itertuples()._asdict()
+    # renames columns containing dots (e.g. ret_0.015_5) to positional names.
     d=d.copy(); d["score"]=d.volr.clip(0,3)*20+(70-(d.rsi-56).abs())+d.ret20*100
-    d=d.sort_values(["date","score"],ascending=[True,False]); out=[]; last={}
-    for r in d.itertuples(index=False):
+    d=d.sort_values(["date","score"],ascending=[True,False]); keep=[]; last={}
+    for idx,r in d.iterrows():
         if r.symbol in last and (r.entry_date-last[r.symbol]).days<14:continue
-        out.append(r._asdict()); last[r.symbol]=r.entry_date
-    return pd.DataFrame(out)
+        keep.append(idx); last[r.symbol]=r.entry_date
+    return d.loc[keep].copy()
 
 def one(r,p):
     buy=r.entry; stop=buy*(1-p["stop"]); target=buy*(1+NET_TARGET+FEE)
