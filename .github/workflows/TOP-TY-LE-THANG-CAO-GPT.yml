@@ -1,0 +1,30 @@
+name: TOP-TY-LE-THANG-CAO-GPT
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Verify independent historical data
+        run: |
+          test -d data || { echo "ERROR: data/ missing"; exit 1; }
+          echo "CSV files: $(find data -maxdepth 1 -name '*.csv' | wc -l)"
+      - name: Optimize Development then lock and evaluate Holdout
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python bot_research.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: TOP-TY-LE-THANG-CAO-GPT-result
+          path: result.json
+          if-no-files-found: ignore
