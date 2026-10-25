@@ -11,7 +11,7 @@ import pandas as pd
 ROOT=Path(__file__).resolve().parent
 DATA=ROOT/"data"
 FEE=.004
-NET_TARGET=.02
+NET_TARGET=.02  # default; research grid overrides per configuration
 DEV_END=pd.Timestamp("2026-04-23")
 HOLD_START=pd.Timestamp("2026-04-24")
 
@@ -70,7 +70,7 @@ def dedup(d):
     return d.loc[keep].copy()
 
 def one(r,p):
-    buy=r.entry; stop=buy*(1-p["stop"]); target=buy*(1+NET_TARGET+FEE)
+    buy=r.entry; stop=buy*(1-p["stop"]); target=buy*(1+p.get("target",NET_TARGET)+FEE)
     ret=None; why="TIME"; mae=0.; mfe=0.; fut=r.future[:p["hz"]]
     for b in fut:
         mae=min(mae,(float(b["low"])/buy-1)*100); mfe=max(mfe,(float(b["high"])/buy-1)*100)
@@ -100,9 +100,10 @@ def grid():
           for r20 in [-.03,.02,.06]:
            for val in [3,10]:
             for br in [-.04,-.01,.01]:
-             for stop in [.015,.02,.025,.03]:
-              for hz in [5,10]:
-               yield dict(rlo=rlo,rhi=rhi,vr=vr,ahi=ahi,m20=m20,r5=r5,r20=r20,val=val,br=br,stop=stop,hz=hz)
+             for target in [.02,.025,.03,.04]:
+              for stop in [.015,.02,.025]:
+               for hz in [3,5,7,10]:
+                yield dict(rlo=rlo,rhi=rhi,vr=vr,ahi=ahi,m20=m20,r5=r5,r20=r20,val=val,br=br,target=target,stop=stop,hz=hz)
 
 def telegram(msg):
     tok=os.getenv("BOT_TOKEN"); chat=os.getenv("CHAT_ID")
@@ -116,7 +117,7 @@ def telegram(msg):
 def fast_metrics(q, p):
     """Evaluate precomputed exits; all results are net of round-trip fees."""
     if q.empty: return None
-    suffix=f"{p['stop']}_{p['hz']}"
+    suffix=f"{p.get('target',NET_TARGET)}_{p['stop']}_{p['hz']}"
     ret=q["ret_"+suffix].to_numpy(dtype=float)
     why=q["why_"+suffix].to_numpy()
     pos=ret[ret>0]; neg=ret[ret<0]
@@ -146,28 +147,29 @@ def main():
     folds=[{"fold":i,"start":str(dev.loc[dev.fold==i,"date"].min().date()),
             "end":str(dev.loc[dev.fold==i,"date"].max().date())} for i in range(3)]
     # Compute the same exit for each row just eight times total, not on every grid trial.
-    for stop in [.015,.02,.025,.03]:
-        for hz in [5,10]:
-            p={"stop":stop,"hz":hz}
-            outcomes=[one(r,p) for r in dev.itertuples(index=False)]
-            suffix=f"{stop}_{hz}"
-            dev["ret_"+suffix]=[z[0] for z in outcomes]
-            dev["why_"+suffix]=[z[1] for z in outcomes]
+    for target in [.02,.025,.03,.04]:
+        for stop in [.015,.02,.025]:
+            for hz in [3,5,7,10]:
+                p={"target":target,"stop":stop,"hz":hz}
+                outcomes=[one(r,p) for r in dev.itertuples(index=False)]
+                suffix=f"{target}_{stop}_{hz}"
+                dev["ret_"+suffix]=[z[0] for z in outcomes]
+                dev["why_"+suffix]=[z[1] for z in outcomes]
     candidates=[]; near=[]; tested=0; screened=0
     cached_key=None; cached_q=None
     for p in grid():
         tested+=1
-        key=tuple((k,v) for k,v in p.items() if k not in ("stop","hz"))
+        key=tuple((k,v) for k,v in p.items() if k not in ("target","stop","hz"))
         if key!=cached_key:
             cached_q=dedup(dev[pmask(dev,p)])
             cached_key=key
         q=cached_q
         if len(q)<80: continue
         e=fast_metrics(q,p)
-        if e["avg"]<=0 or e["pf"]<=1: continue
+        if e["avg"]<=0 or e["pf"]<1.10: continue
         screened+=1
         fs=[fast_metrics(q[q.fold==i],p) for i in range(3)]
-        fold_ok=all(z and z["n"]>=15 and z["avg"]>0 and z["pf"]>1 for z in fs)
+        fold_ok=all(z and z["n"]>=15 and z["avg"]>0 and z["pf"]>=1.10 for z in fs)
         score=e["win2"]*1.35+e["positive"]*.25+e["avg"]*12+min(e["pf"],3)*5-e["stop"]*.55+e["avgloss"]*2
         diag={"score":float(score),"params":p,"development":e,"folds":fs,"robust":bool(fold_ok)}
         near.append(diag)
@@ -196,7 +198,7 @@ def main():
     ho=ev(hold,p)
     result={"tested":tested,"screened":screened,"robust_passed":len(candidates),
             "locked_params":p,"development":de,"development_folds":fs,
-            "holdout":ho,"fee_pct":FEE*100,"target_net_pct":NET_TARGET*100,
+            "holdout":ho,"fee_pct":FEE*100,"target_net_pct":p.get("target",NET_TARGET)*100,
             "data_max":str(x.date.max().date()),"fold_boundaries":folds}
     Path("result.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
     print("LOCKED_RESULT",json.dumps(result,ensure_ascii=False),flush=True)
