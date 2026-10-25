@@ -51,7 +51,7 @@ def attach_future(x):
         g=gs[z.symbol]; ix=g.index[g.date==z.date]
         if not len(ix):continue
         f=g.iloc[int(ix[0])+1:int(ix[0])+11]
-        if len(f)<3:continue
+        if len(f)<10:continue
         r=z._asdict(); r["entry"]=float(f.iloc[0].open); r["entry_date"]=f.iloc[0].date
         r["future"]=f[["date","high","low","close"]].to_dict("records"); rows.append(r)
     return pd.DataFrame(rows)
@@ -108,51 +108,96 @@ def telegram(msg):
     data=urllib.parse.urlencode({"chat_id":chat,"text":msg}).encode()
     urllib.request.urlopen(urllib.request.Request(f"https://api.telegram.org/bot{tok}/sendMessage",data=data),timeout=20).read()
 
+def fast_metrics(q, p):
+    """Evaluate precomputed exits; all results are net of round-trip fees."""
+    if q.empty: return None
+    suffix=f"{p['stop']}_{p['hz']}"
+    ret=q["ret_"+suffix].to_numpy(dtype=float)
+    why=q["why_"+suffix].to_numpy()
+    pos=ret[ret>0]; neg=ret[ret<0]
+    pf=pos.sum()/abs(neg.sum()) if len(neg) and neg.sum()!=0 else (99. if len(pos) else 0.)
+    return {"n":len(ret), "win2":float(np.mean(ret>=2)*100),
+            "positive":float(np.mean(ret>0)*100), "avg":float(ret.mean()),
+            "median":float(np.median(ret)), "stop":float(np.mean(why=="STOP")*100),
+            "target":float(np.mean(why=="TARGET")*100), "pf":float(pf),
+            "avgwin":float(pos.mean()) if len(pos) else 0.,
+            "avgloss":float(neg.mean()) if len(neg) else 0.}
+
 def main():
-    x=load_market(); c=attach_future(x)
-    dev=c[c.date<=DEV_END].copy(); hold=c[c.date>=HOLD_START].copy()
-    folds=[dev[(dev.date>=a)&(dev.date<=b)] for a,b in [
-      (pd.Timestamp("2023-01-01"),pd.Timestamp("2024-01-31")),
-      (pd.Timestamp("2024-02-01"),pd.Timestamp("2025-03-31")),
-      (pd.Timestamp("2025-04-01"),DEV_END)]]
-    # Stage 1: screen all configurations on Development. Keep broad top candidates,
-    # then demand positive expectancy in every Development fold.
-    shortlist=[]; tested=0
+    x=load_market()
+    c=attach_future(x)
+    if c.empty: raise RuntimeError("No complete 10-day future windows in data")
+    # Purge Development trades that would observe prices after the Development cutoff.
+    # This prevents leakage of Holdout prices into training/selection.
+    dev=c[(c.date<=DEV_END)&c.future.map(lambda f: pd.Timestamp(f[9]["date"])<=DEV_END)].copy()
+    hold=c[(c.date>=HOLD_START)].copy()
+    if dev.empty: raise RuntimeError("Development set empty after purging overlapping trades")
+    # Rolling chronological folds derived from available Development dates, not hard-coded years.
+    dates=np.sort(dev.date.unique())
+    if len(dates)<90: raise RuntimeError("Too few Development dates for three temporal folds")
+    cut1=pd.Timestamp(dates[len(dates)//3])
+    cut2=pd.Timestamp(dates[2*len(dates)//3])
+    dev["fold"]=np.select([dev.date<cut1,dev.date<cut2],[0,1],default=2)
+    folds=[{"fold":i,"start":str(dev.loc[dev.fold==i,"date"].min().date()),
+            "end":str(dev.loc[dev.fold==i,"date"].max().date())} for i in range(3)]
+    # Compute the same exit for each row just eight times total, not on every grid trial.
+    for stop in [.015,.02,.025,.03]:
+        for hz in [5,10]:
+            p={"stop":stop,"hz":hz}
+            outcomes=[one(r,p) for r in dev.itertuples(index=False)]
+            suffix=f"{stop}_{hz}"
+            dev["ret_"+suffix]=[z[0] for z in outcomes]
+            dev["why_"+suffix]=[z[1] for z in outcomes]
+    candidates=[]; near=[]; tested=0; screened=0
+    cached_key=None; cached_q=None
     for p in grid():
-        tested+=1; e=ev(dev,p)
-        if not e or e["n"]<80 or e["avg"]<=0 or e["pf"]<=1: continue
-        # Risk-adjusted objective: >=2% wins matter most, but stop rate/loss severity are penalized.
+        tested+=1
+        key=tuple((k,v) for k,v in p.items() if k not in ("stop","hz"))
+        if key!=cached_key:
+            cached_q=dedup(dev[pmask(dev,p)])
+            cached_key=key
+        q=cached_q
+        if len(q)<80: continue
+        e=fast_metrics(q,p)
+        if e["avg"]<=0 or e["pf"]<=1: continue
+        screened+=1
+        fs=[fast_metrics(q[q.fold==i],p) for i in range(3)]
+        fold_ok=all(z and z["n"]>=15 and z["avg"]>0 and z["pf"]>1 for z in fs)
         score=e["win2"]*1.35+e["positive"]*.25+e["avg"]*12+min(e["pf"],3)*5-e["stop"]*.55+e["avgloss"]*2
-        shortlist.append((score,p,e))
-    shortlist=sorted(shortlist,key=lambda z:z[0],reverse=True)[:300]
-    robust=[]
-    diagnostics=[]
-    for score,p,e in shortlist:
-        fs=[ev(f,p) for f in folds]
-        ok=all(q and q["n"]>=15 and q["avg"]>0 and q["pf"]>1 for q in fs)
-        floor=min((q["avg"] for q in fs if q),default=-999)
-        diagnostics.append({"score":score,"params":p,"development":e,"folds":fs,"robust":ok})
-        if ok:
-            robust_score=score+floor*10-min(np.std([q["avg"] for q in fs]),5)*2
-            robust.append((robust_score,p,e,fs))
-    diag={"tested":tested,"screened":len(shortlist),"robust_count":len(robust),
-          "top_candidates":diagnostics[:20]}
-    Path("development_diagnostics.json").write_text(json.dumps(diag,ensure_ascii=False,indent=2),encoding="utf-8")
-    if not robust:
-        telegram(f"⚠️ TOP-TY-LE-THANG-CAO-GPT vòng 2: chưa có cấu hình robust. Đã test {tested:,}; {len(shortlist)} cấu hình Development có P/L dương. Holdout CHƯA mở.")
-        raise RuntimeError("No configuration remained profitable across all Development folds")
-    robust.sort(key=lambda z:z[0],reverse=True)
-    _,p,de,fs=robust[0]
-    # LOCK: Holdout is touched only after the Development winner is fixed.
+        diag={"score":float(score),"params":p,"development":e,"folds":fs,"robust":bool(fold_ok)}
+        near.append(diag)
+        if fold_ok:
+            floor=min(z["avg"] for z in fs)
+            dispersion=float(np.std([z["avg"] for z in fs]))
+            candidates.append((float(score+floor*10-min(dispersion,5)*2),diag))
+    near.sort(key=lambda z:z["score"],reverse=True)
+    candidates.sort(key=lambda z:z[0],reverse=True)
+    diagnostics={"tested":tested,"screened":screened,"robust_count":len(candidates),
+                 "development_rows":len(dev),"holdout_rows_not_used_for_tuning":len(hold),
+                 "fold_boundaries":folds,"top_development_candidates":near[:30],
+                 "top_robust_candidates":[z for _,z in candidates[:15]],
+                 "holdout_not_accessed_for_tuning":True}
+    Path("development_diagnostics.json").write_text(
+        json.dumps(diagnostics,ensure_ascii=False,indent=2),encoding="utf-8")
+    if not candidates:
+        print("NO_ROBUST_CONFIGURATION",json.dumps({"tested":tested,"screened":screened,
+              "folds":folds,"diagnostics":"development_diagnostics.json"},ensure_ascii=False),flush=True)
+        raise RuntimeError("No robust configuration passed the three chronological Development folds; Holdout remains unopened")
+    winner=candidates[0][1]
+    p=winner["params"]
+    de=winner["development"]
+    fs=winner["folds"]
+    # LOCK: no parameter adjustment after reading the Holdout.
     ho=ev(hold,p)
-    result={"tested":tested,"screened":len(shortlist),"robust_passed":len(robust),
-            "locked_params":p,"development":de,"development_folds":fs,"holdout":ho,
-            "fee_pct":FEE*100,"target_net_pct":NET_TARGET*100,"data_max":str(x.date.max().date())}
+    result={"tested":tested,"screened":screened,"robust_passed":len(candidates),
+            "locked_params":p,"development":de,"development_folds":fs,
+            "holdout":ho,"fee_pct":FEE*100,"target_net_pct":NET_TARGET*100,
+            "data_max":str(x.date.max().date()),"fold_boundaries":folds}
     Path("result.json").write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding="utf-8")
-    print("LOCKED_RESULT",json.dumps(result,ensure_ascii=False))
+    print("LOCKED_RESULT",json.dumps(result,ensure_ascii=False),flush=True)
     h=ho or {}
-    telegram("🏆 TOP-TY-LE-THANG-CAO-GPT — KẾT QUẢ KHÓA\n"
-      f"DEV: {de['n']} lệnh | ≥2%: {de['win2']:.1f}% | Có lãi: {de['positive']:.1f}% | TB: {de['avg']:+.2f}% | Stop: {de['stop']:.1f}% | PF: {de['pf']:.2f}\n"
-      f"HOLDOUT: {h.get('n',0)} lệnh | ≥2%: {h.get('win2',float('nan')):.1f}% | Có lãi: {h.get('positive',float('nan')):.1f}% | TB: {h.get('avg',float('nan')):+.2f}% | Stop: {h.get('stop',float('nan')):.1f}% | PF: {h.get('pf',float('nan')):.2f}\n"
-      f"Grid {tested:,} | Robust {len(robust)} | phí 0.4%")
+    telegram("🏆 TOP-TY-LE-THANG-CAO-GPT — KẾT QUẢ KHÓA\\n"
+      f"DEV: {de['n']} lệnh | ≥2%: {de['win2']:.1f}% | Có lãi: {de['positive']:.1f}% | TB: {de['avg']:+.2f}% | Stop: {de['stop']:.1f}% | PF: {de['pf']:.2f}\\n"
+      f"HOLDOUT: {h.get('n',0)} lệnh | ≥2%: {h.get('win2',float('nan')):.1f}% | Có lãi: {h.get('positive',float('nan')):.1f}% | TB: {h.get('avg',float('nan')):+.2f}% | Stop: {h.get('stop',float('nan')):.1f}% | PF: {h.get('pf',float('nan')):.2f}\\n"
+      f"Grid {tested:,} | Robust {len(candidates)} | phí 0.4%")
 if __name__=="__main__":main()
