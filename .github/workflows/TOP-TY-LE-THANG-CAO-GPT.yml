@@ -1,6 +1,8 @@
 name: TOP-TY-LE-THANG-CAO-GPT
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 permissions:
   contents: read
 jobs:
