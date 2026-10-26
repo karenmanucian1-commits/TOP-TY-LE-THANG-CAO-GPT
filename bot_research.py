@@ -150,8 +150,19 @@ def ml_probability_research(dev):
     reports=[]
     for th in [.55,.60,.65,.70,.75]:
         q=dedup(d[(d.prob>=th)&d.prob.notna()])
-        e=ev(q,p) if len(q) else None
-        if e: reports.append({"threshold":th,"metrics":e,"n":len(q)})
+        if q.empty:
+            continue
+        a=[one(r,p) for r in q.itertuples(index=False)]
+        ret=np.array([x[0] for x in a]); rs=np.array([x[1] for x in a])
+        pos=ret[ret>0]; neg=ret[ret<0]
+        pf=pos.sum()/abs(neg.sum()) if len(neg) and neg.sum()!=0 else (99. if len(pos) else 0.)
+        e={"n":len(ret),"win2":float(np.mean(ret>=2-1e-8)*100),
+           "positive":float(np.mean(ret>0)*100),"avg":float(ret.mean()),
+           "median":float(np.median(ret)),"stop":float(np.mean(rs=="STOP")*100),
+           "target":float(np.mean(rs=="TARGET")*100),"pf":float(pf),
+           "avgwin":float(pos.mean()) if len(pos) else 0.,
+           "avgloss":float(neg.mean()) if len(neg) else 0.}
+        reports.append({"threshold":th,"metrics":e,"n":len(q)})
     return {"features":feats,"exit":p,"walk_forward":reports}
 
 def main():
